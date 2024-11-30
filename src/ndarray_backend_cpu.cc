@@ -32,6 +32,89 @@ struct AlignedArray {
   size_t size;
 };
 
+struct COOMatrix {
+  size_t nnz;             // number of non-zero elements
+  size_t rows;            // number of rows
+  size_t cols;            // number of columns
+  scalar_t* data;         // non-zero values
+  int32_t* row_indices;   // row indices
+  int32_t* col_indices;   // column indices
+
+  COOMatrix(size_t nnz, size_t rows, size_t cols)
+      : nnz(nnz), rows(rows), cols(cols) {
+    int ret1 = posix_memalign((void**)&data, ALIGNMENT, nnz * sizeof(scalar_t));
+    int ret2 = posix_memalign((void**)&row_indices, ALIGNMENT, nnz * sizeof(int32_t));
+    int ret3 = posix_memalign((void**)&col_indices, ALIGNMENT, nnz * sizeof(int32_t));
+
+    if (ret1 != 0 || ret2 != 0 || ret3 != 0) {
+      // std::cout << "Could not allocate memory for COO matrix" << std::endl;
+      throw std::bad_alloc();
+    }
+    // std::cout << "Allocated memory for COO matrix" << std::endl;
+  }
+
+  ~COOMatrix() {
+    // std::cout << "Freeing data for COO matrix" << std::endl;
+    free(data);
+    // std::cout << "Freeing row_i for COO matrix" << std::endl;
+    free(row_indices);
+    // std::cout << "Freeing col_i for COO matrix" << std::endl;
+    free(col_indices);
+  }
+
+  COOMatrix(const COOMatrix&) = delete;
+  COOMatrix& operator=(const COOMatrix&) = delete;
+};
+
+COOMatrix* DenseToSparse(const AlignedArray& dense_matrix, size_t rows, size_t cols) {
+  // Count non-zero elements
+  size_t nnz = 0;
+  for (size_t i = 0; i < dense_matrix.size; ++i) {
+    if (dense_matrix.ptr[i] != 0) {
+      ++nnz;
+    }
+  }
+
+  // Initialize the COO matrix
+  COOMatrix* sparse_matrix = new COOMatrix(nnz, rows, cols);
+
+  // Fill the COO matrix with non-zero elements and their indices
+  size_t idx = 0;
+  for (size_t row = 0; row < rows; ++row) {
+    for (size_t col = 0; col < cols; ++col) {
+      scalar_t value = dense_matrix.ptr[row * cols + col];
+      if (value != 0) {
+        sparse_matrix->data[idx] = value;
+        sparse_matrix->row_indices[idx] = row;
+        sparse_matrix->col_indices[idx] = col;
+        ++idx;
+      }
+    }
+  }
+
+  return sparse_matrix;
+}
+
+AlignedArray* SparseToDense(const COOMatrix& sparse_matrix) {
+  // Create a new dense matrix
+  AlignedArray* dense_matrix = new AlignedArray(sparse_matrix.rows * sparse_matrix.cols);
+
+  // Initialize the dense matrix to zero
+  for (size_t i = 0; i < dense_matrix->size; ++i) {
+    dense_matrix->ptr[i] = 0;
+  }
+
+  // Populate the dense matrix with non-zero values
+  for (size_t idx = 0; idx < sparse_matrix.nnz; ++idx) {
+    int32_t row = sparse_matrix.row_indices[idx];
+    int32_t col = sparse_matrix.col_indices[idx];
+    scalar_t value = sparse_matrix.data[idx];
+    dense_matrix->ptr[row * sparse_matrix.cols + col] = value;
+  }
+
+  return dense_matrix;
+}
+
 
 
 void Fill(AlignedArray* out, scalar_t val) {
@@ -442,6 +525,36 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
       .def(py::init<size_t>(), py::return_value_policy::take_ownership)
       .def("ptr", &AlignedArray::ptr_as_int)
       .def_readonly("size", &AlignedArray::size);
+    
+  py::class_<COOMatrix>(m, "COOMatrix")
+      .def(py::init<size_t, size_t, size_t>(), py::return_value_policy::take_ownership)
+      .def_readonly("nnz", &COOMatrix::nnz)
+      .def_readonly("rows", &COOMatrix::rows)
+      .def_readonly("cols", &COOMatrix::cols)
+      .def("get_data", [](const COOMatrix& mat) {
+        return py::array_t<scalar_t>(
+            {mat.nnz},            // Shape
+            {sizeof(scalar_t)},   // Strides
+            mat.data              // Data pointer
+        );
+      })
+      .def("get_row_indices", [](const COOMatrix& mat) {
+        return py::array_t<int32_t>(
+            {mat.nnz},
+            {sizeof(int32_t)},
+            mat.row_indices
+        );
+      })
+      .def("get_col_indices", [](const COOMatrix& mat) {
+        return py::array_t<int32_t>(
+            {mat.nnz},
+            {sizeof(int32_t)},
+            mat.col_indices
+        );
+      });
+
+  m.def("dense_to_sparse", &DenseToSparse);
+  m.def("sparse_to_dense", &SparseToDense);
 
   // return numpy array (with copying for simplicity, otherwise garbage
   // collection is a pain)

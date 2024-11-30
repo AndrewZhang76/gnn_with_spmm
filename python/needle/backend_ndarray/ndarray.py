@@ -84,6 +84,36 @@ def all_devices():
     """return a list of all available devices"""
     return [cpu(), cuda(), cpu_numpy()]
 
+class SparseNDArray:
+    def __init__(self, coo_matrix, device=None):
+        # print("python: SparseNDArray Create\ing")
+        self.coo_matrix = coo_matrix
+        self.device = device if device is not None else cpu()
+        self.nnz = coo_matrix.nnz
+        self.shape = (coo_matrix.rows, coo_matrix.cols)
+
+    @staticmethod
+    def from_dense(dense_array):
+        # print("python: from_dense")
+        device = dense_array.device
+        coo_matrix = device.mod.dense_to_sparse(dense_array._handle, dense_array.shape[0], dense_array.shape[1])
+        # print("python: from_dense to sparse called")
+        return SparseNDArray(coo_matrix, device=device)
+
+    def to_dense(self):
+        dense_shape = self.shape
+        handle = self.device.mod.sparse_to_dense(self.coo_matrix)
+        ndarray = NDArray.make(dense_shape, device=self.device, handle=handle)
+        return ndarray
+    
+    def __repr__(self):
+        data = self.coo_matrix.get_data()
+        row_indices = self.coo_matrix.get_row_indices()
+        col_indices = self.coo_matrix.get_col_indices()
+        return (f"SparseNDArray(nnz={self.nnz}, shape={self.shape},\n"
+                f"  data={data},\n"
+                f"  row_indices={row_indices},\n"
+                f"  col_indices={col_indices})")
 
 class NDArray:
     """A generic ND array class that may contain multipe different backends
@@ -122,6 +152,10 @@ class NDArray:
         self._device = other._device
         self._handle = other._handle
 
+    def to_sparse(self):
+        # print("python: to_sparse")
+        return SparseNDArray.from_dense(self)
+    
     @staticmethod
     def compact_strides(shape):
         """Utility function to compute compact strides"""
@@ -671,3 +705,15 @@ def sum(a, axis=None, keepdims=False):
 
 def flip(a, axes):
     return a.flip(axes)
+
+
+if __name__ == '__main__':
+    dense_array = NDArray(np.array([[1, 0, 3], [0, 2, 0]]), device=cpu())
+    print(dense_array)
+
+    sparse_array = dense_array.to_sparse()
+    print(sparse_array)
+
+    reconstructed_dense = sparse_array.to_dense()
+
+    print(reconstructed_dense)
