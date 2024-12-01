@@ -28,6 +28,31 @@ struct CudaArray {
   size_t size;
 };
 
+struct COOMatrix {
+  size_t nnz;
+  size_t rows;
+  size_t cols;
+  scalar_t* data;
+  int32_t* row_indices;
+  int32_t* col_indices;
+
+  COOMatrix(size_t nnz, size_t rows, size_t cols) : nnz(nnz), rows(rows), cols(cols) {
+    size_t max_nnz = rows * cols;
+    cudaError_t err1 = cudaMalloc(&data, max_nnz * sizeof(scalar_t));
+    if (err1 != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err1));
+    cudaError_t err2 = cudaMalloc(&row_indices, max_nnz * sizeof(int32_t));
+    if (err2 != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err2));
+    cudaError_t err3 = cudaMalloc(&col_indices, max_nnz * sizeof(int32_t));
+    if (err3 != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err3));
+  }
+
+  ~COOMatrix() {
+    cudaFree(data);
+    cudaFree(row_indices);
+    cudaFree(col_indices);
+  }
+};
+
 struct CudaDims {
   dim3 block, grid;
 };
@@ -57,6 +82,88 @@ CudaVec VecToCuda(const std::vector<int32_t>& x) {
     shape.data[i] = x[i];
   }
   return shape;
+}
+
+__global__ void DenseToSparseKernel(const scalar_t* dense, scalar_t* data, int32_t* row_indices, int32_t* col_indices, size_t rows, size_t cols, unsigned int* nnz_counter) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  size_t total_size = rows * cols;
+  // printf("Idx: %d, Total Size: %d\n", static_cast<int>(idx), static_cast<int>(total_size));
+  if (idx < total_size) {
+    scalar_t val = dense[idx];
+    // printf("Val: %f\n", val);
+    if (val != 0) {
+      // printf("Val not 0: %f\n", val);
+      unsigned int nnz_idx = atomicAdd(nnz_counter, 1);
+      data[nnz_idx] = val;
+      row_indices[nnz_idx] = idx / cols;
+      col_indices[nnz_idx] = idx % cols;
+      // printf("NNZ: %d, Val: %f, Row: %d, Col: %d\n", nnz_idx, val, row_indices[nnz_idx], col_indices[nnz_idx]);
+    }
+  }
+}
+
+COOMatrix* DenseToSparse(const CudaArray& dense_matrix, size_t rows, size_t cols) {
+  unsigned int* d_nnz_counter;
+  cudaMalloc(&d_nnz_counter, sizeof(unsigned int));
+  cudaMemset(d_nnz_counter, 0, sizeof(unsigned int));
+
+  size_t total_size = rows * cols;
+  COOMatrix* sparse_matrix = new COOMatrix(total_size, rows, cols); // Over allocate mem
+
+  CudaDims dim = CudaOneDim(total_size);
+  DenseToSparseKernel<<<dim.grid, dim.block>>>(dense_matrix.ptr, sparse_matrix->data, sparse_matrix->row_indices, sparse_matrix->col_indices, rows, cols, d_nnz_counter);
+  cudaDeviceSynchronize();
+
+  unsigned int h_nnz_counter;
+  cudaMemcpy(&h_nnz_counter, d_nnz_counter, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+
+  // Allocate new arrays with the actual number of non-zero elements
+  scalar_t* new_data;
+  int32_t* new_row_indices;
+  int32_t* new_col_indices;
+  cudaMalloc(&new_data, h_nnz_counter * sizeof(scalar_t));
+  cudaMalloc(&new_row_indices, h_nnz_counter * sizeof(int32_t));
+  cudaMalloc(&new_col_indices, h_nnz_counter * sizeof(int32_t));
+
+  // Copy the non-zero elements to the new arrays
+  cudaMemcpy(new_data, sparse_matrix->data, h_nnz_counter * sizeof(scalar_t), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(new_row_indices, sparse_matrix->row_indices, h_nnz_counter * sizeof(int32_t), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(new_col_indices, sparse_matrix->col_indices, h_nnz_counter * sizeof(int32_t), cudaMemcpyDeviceToDevice);
+
+  // Free the old over-allocated memory
+  cudaFree(sparse_matrix->data);
+  cudaFree(sparse_matrix->row_indices);
+  cudaFree(sparse_matrix->col_indices);
+
+  // Update the sparse matrix with new pointers and actual nnz count
+  sparse_matrix->data = new_data;
+  sparse_matrix->row_indices = new_row_indices;
+  sparse_matrix->col_indices = new_col_indices;
+  sparse_matrix->nnz = h_nnz_counter;
+
+  // Free the device nnz counter
+  cudaFree(d_nnz_counter);
+
+  // Return the updated sparse matrix
+  return sparse_matrix;
+}
+
+__global__ void SparseToDenseKernel(scalar_t* dense, const scalar_t* data, const int32_t* row_indices, const int32_t* col_indices, size_t nnz, size_t rows, size_t cols) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < nnz) {
+    int row = row_indices[idx];
+    int col = col_indices[idx];
+    dense[row * cols + col] = data[idx];
+  }
+}
+
+CudaArray* SparseToDense(const COOMatrix& sparse_matrix) {
+  CudaArray* dense_matrix = new CudaArray(sparse_matrix.rows * sparse_matrix.cols);
+  cudaMemset(dense_matrix->ptr, 0, dense_matrix->size * sizeof(scalar_t));
+
+  CudaDims dim = CudaOneDim(sparse_matrix.nnz);
+  SparseToDenseKernel<<<dim.grid, dim.block>>>(dense_matrix->ptr, sparse_matrix.data, sparse_matrix.row_indices, sparse_matrix.col_indices, sparse_matrix.nnz, sparse_matrix.rows, sparse_matrix.cols);
+  return dense_matrix;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -514,6 +621,39 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
       .def(py::init<size_t>(), py::return_value_policy::take_ownership)
       .def_readonly("size", &CudaArray::size)
       .def("ptr", &CudaArray::ptr_as_int);
+
+  py::class_<COOMatrix>(m, "COOMatrix")
+      .def(py::init<size_t, size_t, size_t>(), py::return_value_policy::take_ownership)
+      .def_readonly("nnz", &COOMatrix::nnz)
+      .def_readonly("rows", &COOMatrix::rows)
+      .def_readonly("cols", &COOMatrix::cols)
+      .def("get_data", [](const COOMatrix& mat) {
+          // Allocate host memory
+          std::vector<scalar_t> host_data(mat.nnz);
+          // Copy data from device to host
+          cudaError_t err = cudaMemcpy(
+              host_data.data(), mat.data, mat.nnz * sizeof(scalar_t), cudaMemcpyDeviceToHost);
+          if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+          // Return as NumPy array
+          return py::array_t<scalar_t>(mat.nnz, host_data.data());
+      })
+      .def("get_row_indices", [](const COOMatrix& mat) {
+          std::vector<int32_t> host_row_indices(mat.nnz);
+          cudaError_t err = cudaMemcpy(
+              host_row_indices.data(), mat.row_indices, mat.nnz * sizeof(int32_t), cudaMemcpyDeviceToHost);
+          if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+          return py::array_t<int32_t>(mat.nnz, host_row_indices.data());
+      })
+      .def("get_col_indices", [](const COOMatrix& mat) {
+          std::vector<int32_t> host_col_indices(mat.nnz);
+          cudaError_t err = cudaMemcpy(
+              host_col_indices.data(), mat.col_indices, mat.nnz * sizeof(int32_t), cudaMemcpyDeviceToHost);
+          if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+          return py::array_t<int32_t>(mat.nnz, host_col_indices.data());
+      });
+
+  m.def("dense_to_sparse", &DenseToSparse);
+  m.def("sparse_to_dense", &SparseToDense);
 
   // return numpy array, copying from CPU
   m.def("to_numpy", [](const CudaArray& a, std::vector<size_t> shape, std::vector<size_t> strides,

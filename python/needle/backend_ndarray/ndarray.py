@@ -709,6 +709,7 @@ def flip(a, axes):
 
 if __name__ == '__main__':
     dense_array = NDArray(np.array([[1, 0, 3], [0, 2, 0]]), device=cpu())
+    # dense_array = NDArray(np.array([[1, 0, 3], [0, 2, 0]]), device=cuda())
     print(dense_array)
 
     sparse_array = dense_array.to_sparse()
