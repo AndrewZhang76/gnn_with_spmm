@@ -84,10 +84,10 @@ def all_devices():
     """return a list of all available devices"""
     return [cpu(), cuda(), cpu_numpy()]
 
-class SparseNDArray:
+class SparseMatrix:
     def __init__(self, coo_matrix, device=None):
-        # print("python: SparseNDArray Create\ing")
-        self.coo_matrix = coo_matrix
+        # print("python: SparseMatrix Create\ing")
+        self._handle = coo_matrix
         self.device = device if device is not None else cpu()
         self.nnz = coo_matrix.nnz
         self.shape = (coo_matrix.rows, coo_matrix.cols)
@@ -98,23 +98,51 @@ class SparseNDArray:
         device = dense_array.device
         coo_matrix = device.mod.dense_to_sparse(dense_array._handle, dense_array.shape[0], dense_array.shape[1])
         # print("python: from_dense to sparse called")
-        return SparseNDArray(coo_matrix, device=device)
+        return SparseMatrix(coo_matrix, device=device)
 
     def to_dense(self):
         dense_shape = self.shape
-        handle = self.device.mod.sparse_to_dense(self.coo_matrix)
+        handle = self.device.mod.sparse_to_dense(self._handle)
         ndarray = NDArray.make(dense_shape, device=self.device, handle=handle)
         return ndarray
     
     def __repr__(self):
-        data = self.coo_matrix.get_data()
-        row_indices = self.coo_matrix.get_row_indices()
-        col_indices = self.coo_matrix.get_col_indices()
-        return (f"SparseNDArray(nnz={self.nnz}, shape={self.shape},\n"
+        data = self._handle.get_data()
+        row_indices = self._handle.get_row_indices()
+        col_indices = self._handle.get_col_indices()
+        return (f"SparseMatrix(nnz={self.nnz}, shape={self.shape},\n"
                 f"  data={data},\n"
                 f"  row_indices={row_indices},\n"
                 f"  col_indices={col_indices})")
-
+       
+    def apply_func_based_on_type(self, other, sparse_fun, dense_fun, scalar_fun=None, scalar_fun_return_sparse=False):
+        """Run either an elementwise or scalar version of a function,
+        depending on whether "other" is an NDArray or scalar
+        """
+        if isinstance(other, NDArray):
+            assert other.ndim == 2, "SparseMatrix only supports 2D arrays"
+            out = NDArray.make(other.shape, device=self.device)
+            dense_fun(self._handle, other.compact()._handle, out._handle)
+        elif isinstance(other, SparseMatrix):
+            out_handle = self.device.mod.COOMatrix(self.nnz, self.shape[0], self.shape[1])
+            out = SparseMatrix(out_handle, device=self.device)
+            sparse_fun(self._handle, other._handle, out._handle)
+        else:
+            assert scalar_fun is not None, "Scalar function not implemented"
+            if scalar_fun_return_sparse:
+                out_handle = self.device.mod.COOMatrix(self.nnz, self.shape[0], self.shape[1])
+                out = SparseMatrix(out_handle, device=self.device)
+                scalar_fun(self._handle, other, out._handle)
+            else:
+                out = NDArray.make(self.shape, device=self.device)
+                scalar_fun(self._handle, other, out._handle)
+        return out
+    
+    def __add__(self, other):
+        return self.apply_func_based_on_type(other,
+                                    self.device.mod.sparse_sparse_add,
+                                    self.device.mod.sparse_dense_add)
+    
 class NDArray:
     """A generic ND array class that may contain multipe different backends
     i.e., a Numpy backend, a native CPU backend, or a GPU backend.
@@ -154,7 +182,8 @@ class NDArray:
 
     def to_sparse(self):
         # print("python: to_sparse")
-        return SparseNDArray.from_dense(self)
+        assert self.ndim == 2, "SparseMatrix only supports 2D arrays"
+        return SparseMatrix.from_dense(self)
     
     @staticmethod
     def compact_strides(shape):
@@ -450,7 +479,7 @@ class NDArray:
 
     ### Collection of elementwise and scalar function: add, multiply, boolean, etc
 
-    def ewise_or_scalar(self, other, ewise_func, scalar_func):
+    def apply_func_based_on_type(self, other, ewise_func, scalar_func, sparse_func=None):
         """Run either an elementwise or scalar version of a function,
         depending on whether "other" is an NDArray or scalar
         """
@@ -458,13 +487,17 @@ class NDArray:
         if isinstance(other, NDArray):
             assert self.shape == other.shape, "operation needs two equal-sized arrays"
             ewise_func(self.compact()._handle, other.compact()._handle, out._handle)
+        elif isinstance(other, SparseMatrix):
+            assert self.ndim == 2, "SparseMatrix only supports 2D arrays"
+            assert sparse_func is not None, "Sparse function not implemented"
+            sparse_func(other._handle, self.compact()._handle, out._handle)
         else:
             scalar_func(self.compact()._handle, other, out._handle)
         return out
 
     def __add__(self, other):
-        return self.ewise_or_scalar(
-            other, self.device.ewise_add, self.device.scalar_add
+        return self.apply_func_based_on_type(
+            other, self.device.ewise_add, self.device.scalar_add, self.device.sparse_dense_add
         )
 
     __radd__ = __add__
@@ -476,14 +509,14 @@ class NDArray:
         return other + (-self)
 
     def __mul__(self, other):
-        return self.ewise_or_scalar(
+        return self.apply_func_based_on_type(
             other, self.device.ewise_mul, self.device.scalar_mul
         )
 
     __rmul__ = __mul__
 
     def __truediv__(self, other):
-        return self.ewise_or_scalar(
+        return self.apply_func_based_on_type(
             other, self.device.ewise_div, self.device.scalar_div
         )
 
@@ -496,16 +529,16 @@ class NDArray:
         return out
 
     def maximum(self, other):
-        return self.ewise_or_scalar(
+        return self.apply_func_based_on_type(
             other, self.device.ewise_maximum, self.device.scalar_maximum
         )
 
     ### Binary operators all return (0.0, 1.0) floating point values, could of course be optimized
     def __eq__(self, other):
-        return self.ewise_or_scalar(other, self.device.ewise_eq, self.device.scalar_eq)
+        return self.apply_func_based_on_type(other, self.device.ewise_eq, self.device.scalar_eq)
 
     def __ge__(self, other):
-        return self.ewise_or_scalar(other, self.device.ewise_ge, self.device.scalar_ge)
+        return self.apply_func_based_on_type(other, self.device.ewise_ge, self.device.scalar_ge)
 
     def __ne__(self, other):
         return 1 - (self == other)
@@ -710,11 +743,12 @@ def flip(a, axes):
 if __name__ == '__main__':
     dense_array = NDArray(np.array([[1, 0, 3], [0, 2, 0]]), device=cpu())
     # dense_array = NDArray(np.array([[1, 0, 3], [0, 2, 0]]), device=cuda())
-    print(dense_array)
+    # print(dense_array)
 
     sparse_array = dense_array.to_sparse()
     print(sparse_array)
 
-    reconstructed_dense = sparse_array.to_dense()
-
-    print(reconstructed_dense)
+    dense_array2 = NDArray(np.array([[1, 1, 3], [0, 2, 1]]), device=cpu())
+    sparse_array2 = dense_array2.to_sparse()
+    print(sparse_array2)
+    print((sparse_array + sparse_array2).to_dense())

@@ -102,13 +102,13 @@ __global__ void DenseToSparseKernel(const scalar_t* dense, scalar_t* data, int32
   }
 }
 
-COOMatrix* DenseToSparse(const CudaArray& dense_matrix, size_t rows, size_t cols) {
+std::unique_ptr<COOMatrix> DenseToSparse(const CudaArray& dense_matrix, size_t rows, size_t cols) {
   unsigned int* d_nnz_counter;
   cudaMalloc(&d_nnz_counter, sizeof(unsigned int));
   cudaMemset(d_nnz_counter, 0, sizeof(unsigned int));
 
   size_t total_size = rows * cols;
-  COOMatrix* sparse_matrix = new COOMatrix(total_size, rows, cols); // Over allocate mem
+  std::unique_ptr<COOMatrix> sparse_matrix (new COOMatrix(total_size, rows, cols));
 
   CudaDims dim = CudaOneDim(total_size);
   DenseToSparseKernel<<<dim.grid, dim.block>>>(dense_matrix.ptr, sparse_matrix->data, sparse_matrix->row_indices, sparse_matrix->col_indices, rows, cols, d_nnz_counter);
@@ -157,8 +157,8 @@ __global__ void SparseToDenseKernel(scalar_t* dense, const scalar_t* data, const
   }
 }
 
-CudaArray* SparseToDense(const COOMatrix& sparse_matrix) {
-  CudaArray* dense_matrix = new CudaArray(sparse_matrix.rows * sparse_matrix.cols);
+std::unique_ptr<CudaArray> SparseToDense(const COOMatrix& sparse_matrix) {
+  std::unique_ptr<CudaArray> dense_matrix (new CudaArray(sparse_matrix.rows * sparse_matrix.cols));
   cudaMemset(dense_matrix->ptr, 0, dense_matrix->size * sizeof(scalar_t));
 
   CudaDims dim = CudaOneDim(sparse_matrix.nnz);
@@ -302,6 +302,33 @@ void ScalarSetitem(size_t size, scalar_t val, CudaArray* out, std::vector<int32_
 ////////////////////////////////////////////////////////////////////////////////
 // Elementwise and scalar operations
 ////////////////////////////////////////////////////////////////////////////////
+
+__global__ void SparseDenseAddKernel(const scalar_t* data, const int32_t* row_indices, const int32_t* col_indices, size_t num_cols, size_t nnz, const scalar_t* b, scalar_t* out, size_t size) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx < size) {
+    out[idx] = b[idx];
+  }
+
+  if (idx < nnz) {
+    int row = row_indices[idx];
+    int col = col_indices[idx];
+    size_t index = row * num_cols + col;
+    atomicAdd(&out[index], data[idx]);
+  }
+}
+
+void SparseDenseAdd(const COOMatrix& a, const CudaArray& b, CudaArray* out) {
+  /**
+   * Args:
+   *   a: sparse matrix to add
+   *   b: dense matrix to add
+   *   out: dense matrix to write the output to
+   */
+
+  CudaDims dim = CudaOneDim(out->size);
+  SparseDenseAddKernel<<<dim.grid, dim.block>>>(a.data, a.row_indices, a.col_indices, a.cols, a.nnz, b.ptr, out->ptr, out->size);
+}
 
 __global__ void EwiseAddKernel(const scalar_t* a, const scalar_t* b, scalar_t* out, size_t size) {
   // Calculate the global index of the thread.
@@ -686,6 +713,7 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
   m.def("scalar_setitem", ScalarSetitem);
   m.def("ewise_add", EwiseAdd);
   m.def("scalar_add", ScalarAdd);
+  m.def("sparse_dense_add", SparseDenseAdd);
 
   m.def("ewise_mul", EwiseMul);
   m.def("scalar_mul", ScalarMul);

@@ -66,7 +66,7 @@ struct COOMatrix {
   COOMatrix& operator=(const COOMatrix&) = delete;
 };
 
-COOMatrix* DenseToSparse(const AlignedArray& dense_matrix, size_t rows, size_t cols) {
+std::unique_ptr<COOMatrix> DenseToSparse(const AlignedArray& dense_matrix, size_t rows, size_t cols) {
   // Count non-zero elements
   size_t nnz = 0;
   for (size_t i = 0; i < dense_matrix.size; ++i) {
@@ -76,8 +76,7 @@ COOMatrix* DenseToSparse(const AlignedArray& dense_matrix, size_t rows, size_t c
   }
 
   // Initialize the COO matrix
-  COOMatrix* sparse_matrix = new COOMatrix(nnz, rows, cols);
-
+  std::unique_ptr<COOMatrix> sparse_matrix(new COOMatrix(nnz, rows, cols));
   // Fill the COO matrix with non-zero elements and their indices
   size_t idx = 0;
   for (size_t row = 0; row < rows; ++row) {
@@ -95,9 +94,9 @@ COOMatrix* DenseToSparse(const AlignedArray& dense_matrix, size_t rows, size_t c
   return sparse_matrix;
 }
 
-AlignedArray* SparseToDense(const COOMatrix& sparse_matrix) {
+std::unique_ptr<AlignedArray> SparseToDense(const COOMatrix& sparse_matrix) {
   // Create a new dense matrix
-  AlignedArray* dense_matrix = new AlignedArray(sparse_matrix.rows * sparse_matrix.cols);
+  std::unique_ptr<AlignedArray> dense_matrix(new AlignedArray(sparse_matrix.rows * sparse_matrix.cols));
 
   // Initialize the dense matrix to zero
   for (size_t i = 0; i < dense_matrix->size; ++i) {
@@ -114,8 +113,6 @@ AlignedArray* SparseToDense(const COOMatrix& sparse_matrix) {
 
   return dense_matrix;
 }
-
-
 
 void Fill(AlignedArray* out, scalar_t val) {
   /**
@@ -258,6 +255,74 @@ void ScalarAdd(const AlignedArray& a, scalar_t val, AlignedArray* out) {
   }
 }
 
+void SparseDenseAdd(const COOMatrix& a, const AlignedArray& b, AlignedArray* out) {
+  /**
+   * Add a sparse matrix to a dense matrix.
+   *
+   * Args:
+   *   a: sparse matrix
+   *   b: dense matrix
+   *   out: dense matrix to write to
+   */
+  for (size_t i = 0; i < b.size; i++) {
+    out->ptr[i] = b.ptr[i];
+  }
+  for (size_t i = 0; i < a.nnz; i++) {
+    out->ptr[a.row_indices[i] * a.cols + a.col_indices[i]] += a.data[i];
+  }
+}
+
+struct PairHash {
+  template <class T1, class T2>
+  std::size_t operator () (const std::pair<T1, T2>& p) const {
+    auto h1 = std::hash<T1>{}(p.first);
+    auto h2 = std::hash<T2>{}(p.second);
+    return h1 ^ (h2 << 1);
+  }
+};
+
+void SparseSparseAdd(const COOMatrix& a, const COOMatrix& b, COOMatrix* out) {
+  /**
+   * Add two sparse matrices.
+   *
+   * Args:
+   *   a: first sparse matrix
+   *   b: second sparse matrix
+   *   out: sparse matrix to write to
+   */
+  // Copy the first matrix to the output matrix and keep a set of row, col indices.
+  std::unordered_map<std::pair<int32_t, int32_t>, scalar_t, PairHash> out_map;
+  out_map.reserve(a.nnz+b.nnz);
+  for (size_t i = 0; i < a.nnz; i++) {
+    out_map[std::make_pair(a.row_indices[i], a.col_indices[i])] = a.data[i];
+  }
+  for (size_t i = 0; i < b.nnz; i++) {
+    if (out_map.find(std::make_pair(b.row_indices[i], b.col_indices[i])) != out_map.end()) {
+      out_map[std::make_pair(b.row_indices[i], b.col_indices[i])] += b.data[i];
+    } else {
+      out_map[std::make_pair(b.row_indices[i], b.col_indices[i])] = b.data[i];
+    }
+  }
+  // Copy the output map to the output matrix.
+  out->nnz = out_map.size();
+  out->rows = a.rows;
+  out->cols = a.cols;
+  void *data_ptr, *row_ptr, *col_ptr;
+  int ret1 = posix_memalign(&data_ptr, ALIGNMENT, out->nnz * sizeof(scalar_t));
+  int ret2 = posix_memalign(&row_ptr, ALIGNMENT, out->nnz * sizeof(int32_t));
+  int ret3 = posix_memalign(&col_ptr, ALIGNMENT, out->nnz * sizeof(int32_t));
+  if (ret1 != 0 || ret2 != 0 || ret3 != 0) throw std::bad_alloc();
+  out->data = static_cast<scalar_t*>(data_ptr);
+  out->row_indices = static_cast<int32_t*>(row_ptr);
+  out->col_indices = static_cast<int32_t*>(col_ptr);
+  size_t idx = 0;
+  for (auto it = out_map.begin(); it != out_map.end(); it++) {
+    out->data[idx] = it->second;
+    out->row_indices[idx] = it->first.first;
+    out->col_indices[idx] = it->first.second;
+    idx++;
+  }
+}
 
 /**
  * In the code the follows, use the above template to create analogous element-wise
@@ -577,6 +642,8 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
   m.def("scalar_setitem", ScalarSetitem);
   m.def("ewise_add", EwiseAdd);
   m.def("scalar_add", ScalarAdd);
+  m.def("sparse_dense_add", SparseDenseAdd);
+  m.def("sparse_sparse_add", SparseSparseAdd);
 
   m.def("ewise_mul", EwiseMul);
   m.def("scalar_mul", ScalarMul);
