@@ -19,15 +19,6 @@ class GNNDataset(Dataset):
         self,
         train: bool,
     ):
-        """
-        Parameters:
-        base_folder - cifar-10-batches-py folder filepath
-        train - bool, if True load training dataset, else load test dataset
-        Divide pixel values by 255. so that images are in 0-1 range.
-        Attributes:
-        X - numpy array of images
-        y - numpy array of labels
-        """
         ### BEGIN YOUR SOLUTION
         self.train = train
         
@@ -35,9 +26,10 @@ class GNNDataset(Dataset):
 
         num_examples = len(dataset)
         num_train = int(num_examples * 0.8)
-
-        train_sampler = SubsetRandomSampler(torch.arange(num_train))
-        test_sampler = SubsetRandomSampler(torch.arange(num_train, num_examples))
+        if self.train:
+            dataset = dataset[:num_train]
+        else:
+            dataset = dataset[num_train:]
         self.X = []
         self.y = []
         device = cpu()
@@ -55,7 +47,6 @@ class GNNDataset(Dataset):
     def __getitem__(self, index) -> object:
         """
         Returns the image, label at given index
-        Image should be of shape (3, 32, 32)
         """
         ### BEGIN YOUR SOLUTION
         X_item = self.X[index]
