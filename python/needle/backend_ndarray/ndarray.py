@@ -115,15 +115,17 @@ class SparseMatrix:
                 f"  row_indices={row_indices},\n"
                 f"  col_indices={col_indices})")
        
-    def apply_func_based_on_type(self, other, sparse_fun, dense_fun, scalar_fun=None, scalar_fun_return_sparse=False):
+    def apply_func_based_on_type(self, other, sparse_fun=None, dense_fun=None, scalar_fun=None, scalar_fun_return_sparse=False):
         """Run either an elementwise or scalar version of a function,
         depending on whether "other" is an NDArray or scalar
         """
         if isinstance(other, NDArray):
+            assert dense_fun is not None, "Dense function not implemented"
             assert other.ndim == 2, "SparseMatrix only supports 2D arrays"
             out = NDArray.make(other.shape, device=self.device)
             dense_fun(self._handle, other.compact()._handle, out._handle)
         elif isinstance(other, SparseMatrix):
+            assert sparse_fun is not None, "Sparse function not implemented"
             out_handle = self.device.mod.COOMatrix(self.nnz, self.shape[0], self.shape[1])
             out = SparseMatrix(out_handle, device=self.device)
             sparse_fun(self._handle, other._handle, out._handle)
@@ -140,8 +142,13 @@ class SparseMatrix:
     
     def __add__(self, other):
         return self.apply_func_based_on_type(other,
-                                    self.device.mod.sparse_sparse_add,
-                                    self.device.mod.sparse_dense_add)
+                                    sparse_fun=self.device.mod.sparse_sparse_add,
+                                    dense_fun=self.device.mod.sparse_dense_add)
+
+    def __mul__(self, other):
+        return self.apply_func_based_on_type(other,
+                                    sparse_fun=self.device.mod.sparse_matmul_coo)
+
     
 class NDArray:
     """A generic ND array class that may contain multipe different backends
@@ -741,14 +748,14 @@ def flip(a, axes):
 
 
 if __name__ == '__main__':
-    dense_array = NDArray(np.array([[1, 0, 3], [0, 2, 0]]), device=cpu())
+    dense_array = NDArray(np.array([[0,2], [3,0]]), device=cuda())
     # dense_array = NDArray(np.array([[1, 0, 3], [0, 2, 0]]), device=cuda())
     # print(dense_array)
 
     sparse_array = dense_array.to_sparse()
     print(sparse_array)
 
-    dense_array2 = NDArray(np.array([[1, 1, 3], [0, 2, 1]]), device=cpu())
+    dense_array2 = NDArray(np.array([[4,0], [0,5]]), device=cuda())
     sparse_array2 = dense_array2.to_sparse()
     print(sparse_array2)
-    print((sparse_array + sparse_array2).to_dense())
+    print((sparse_array * sparse_array2).to_dense())

@@ -533,6 +533,73 @@ void MatmulTiled(const AlignedArray& a, const AlignedArray& b, AlignedArray* out
   /// END SOLUTION
 }
 
+void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
+  /**
+   * Multiply two sparse matrices in COO format and store the result in COO format.
+   *
+   * Args:
+   *   A: COOMatrix representing the first matrix (size m x n)
+   *   B: COOMatrix representing the second matrix (size n x p)
+   *   C: COOMatrix pointer to store the result (size m x p)
+   */
+
+  // Check for valid matrix dimensions
+  if (A.cols != B.rows) {
+    throw std::invalid_argument("Number of columns of A must equal number of rows of B");
+  }
+
+  // Map to accumulate the result entries
+  // Key: (row, col), Value: sum of products
+  std::unordered_map<std::pair<int32_t, int32_t>, scalar_t, PairHash> result_map;
+
+  // Build a mapping from B's row indices to their positions for quick access
+  std::unordered_map<int32_t, std::vector<size_t>> B_row_map;
+  for (size_t i = 0; i < B.nnz; ++i) {
+    B_row_map[B.row_indices[i]].push_back(i);
+  }
+
+  // Perform multiplication
+  for (size_t i = 0; i < A.nnz; ++i) {
+    int32_t row_a = A.row_indices[i];
+    int32_t col_a = A.col_indices[i];
+    scalar_t val_a = A.data[i];
+
+    // Find matching entries in B where B.row_indices == col_a
+    auto it = B_row_map.find(col_a);
+    if (it != B_row_map.end()) {
+      for (size_t idx : it->second) {
+        int32_t col_b = B.col_indices[idx];
+        scalar_t val_b = B.data[idx];
+
+        // Accumulate the product into the result map
+        std::pair<int32_t, int32_t> key = {row_a, col_b};
+        result_map[key] += val_a * val_b;
+      }
+    }
+  }
+
+  // Allocate memory for the result COOMatrix
+  C->nnz = result_map.size();
+  C->rows = A.rows;
+  C->cols = B.cols;
+  C->data = (scalar_t*)malloc(C->nnz * sizeof(scalar_t));
+  C->row_indices = (int32_t*)malloc(C->nnz * sizeof(int32_t));
+  C->col_indices = (int32_t*)malloc(C->nnz * sizeof(int32_t));
+
+  if (!C->data || !C->row_indices || !C->col_indices) {
+    throw std::bad_alloc();
+  }
+
+  // Populate the result COOMatrix with the accumulated values
+  size_t idx = 0;
+  for (const auto& entry : result_map) {
+    C->row_indices[idx] = entry.first.first;
+    C->col_indices[idx] = entry.first.second;
+    C->data[idx] = entry.second;
+    ++idx;
+  }
+}
+
 void ReduceMax(const AlignedArray& a, AlignedArray* out, size_t reduce_size) {
   /**
    * Reduce by taking maximum over `reduce_size` contiguous blocks.
@@ -664,6 +731,7 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
 
   m.def("matmul", Matmul);
   m.def("matmul_tiled", MatmulTiled);
+  m.def("sparse_matmul_coo", SparseMatmulCOO);
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
