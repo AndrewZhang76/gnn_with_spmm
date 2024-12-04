@@ -5,9 +5,11 @@
 
 #include <iostream>
 #include <sstream>
+#include <thrust/sort.h>
+#include <thrust/device_vector.h>
 
 namespace needle {
-namespace cuda {
+namespace needle_cuda {
 
 #define BASE_THREAD_NUM 256
 
@@ -336,6 +338,60 @@ __global__ void EwiseAddKernel(const scalar_t* a, const scalar_t* b, scalar_t* o
   if (gid < size) out[gid] = a[gid] + b[gid];
 }
 
+void SparseSparseAdd(const COOMatrix& a, const COOMatrix& b, COOMatrix* out) {
+  size_t total_nnz = a.nnz + b.nnz;
+
+  // Create device vectors to hold combined data
+  thrust::device_vector<scalar_t> data_vec(total_nnz);
+  thrust::device_vector<int32_t> row_vec(total_nnz);
+  thrust::device_vector<int32_t> col_vec(total_nnz);
+
+  // Copy data from matrix 'a'
+  thrust::copy_n(a.data, a.nnz, data_vec.begin());
+  thrust::copy_n(a.row_indices, a.nnz, row_vec.begin());
+  thrust::copy_n(a.col_indices, a.nnz, col_vec.begin());
+
+  // Copy data from matrix 'b'
+  thrust::copy_n(b.data, b.nnz, data_vec.begin() + a.nnz);
+  thrust::copy_n(b.row_indices, b.nnz, row_vec.begin() + a.nnz);
+  thrust::copy_n(b.col_indices, b.nnz, col_vec.begin() + a.nnz);
+
+  // Zip the row and column indices
+  auto zip_begin = thrust::make_zip_iterator(thrust::make_tuple(row_vec.begin(), col_vec.begin()));
+  auto zip_end = thrust::make_zip_iterator(thrust::make_tuple(row_vec.end(), col_vec.end()));
+
+  // Sort by (row, col)
+  thrust::sort_by_key(zip_begin, zip_end, data_vec.begin());
+
+  // Reduce duplicates by summing data values
+  thrust::device_vector<scalar_t> data_reduced(total_nnz);
+  thrust::device_vector<int32_t> row_reduced(total_nnz);
+  thrust::device_vector<int32_t> col_reduced(total_nnz);
+
+  auto zip_keys_out = thrust::make_zip_iterator(thrust::make_tuple(row_reduced.begin(), col_reduced.begin()));
+  auto new_end = thrust::reduce_by_key(
+      zip_begin,
+      zip_end,
+      data_vec.begin(),
+      zip_keys_out,
+      data_reduced.begin());
+
+  size_t nnz_new = thrust::distance(data_reduced.begin(), new_end.second);
+
+  // Update the output COOMatrix
+  out->nnz = nnz_new;
+  out->rows = a.rows;
+  out->cols = a.cols;
+
+  // Allocate memory for the output data
+  cudaMalloc(&(out->data), nnz_new * sizeof(scalar_t));
+  cudaMalloc(&(out->row_indices), nnz_new * sizeof(int32_t));
+  cudaMalloc(&(out->col_indices), nnz_new * sizeof(int32_t));
+  cudaMemcpy(out->data, data_reduced.data().get(), nnz_new * sizeof(scalar_t), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(out->row_indices, row_reduced.data().get(), nnz_new * sizeof(int32_t), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(out->col_indices, col_reduced.data().get(), nnz_new * sizeof(int32_t), cudaMemcpyDeviceToDevice);
+}
+
 void EwiseAdd(const CudaArray& a, const CudaArray& b, CudaArray* out) {
   /**
    * Add together two CUDA arrays.
@@ -639,7 +695,7 @@ void ReduceSum(const CudaArray& a, CudaArray* out, size_t reduce_size) {
 PYBIND11_MODULE(ndarray_backend_cuda, m) {
   namespace py = pybind11;
   using namespace needle;
-  using namespace cuda;
+  using namespace needle_cuda;
 
   m.attr("__device_name__") = "cuda";
   m.attr("__tile_size__") = TILE;
@@ -714,6 +770,7 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
   m.def("ewise_add", EwiseAdd);
   m.def("scalar_add", ScalarAdd);
   m.def("sparse_dense_add", SparseDenseAdd);
+  m.def("sparse_sparse_add", SparseSparseAdd);
 
   m.def("ewise_mul", EwiseMul);
   m.def("scalar_mul", ScalarMul);

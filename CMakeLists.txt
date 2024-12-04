@@ -54,7 +54,7 @@ endif()
 ### CUDA BACKEND ###
 ####################
 set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda")
-find_package(CUDA)
+find_package(CUDA REQUIRED)
 message(STATUS "CUDA_FOUND: ${CUDA_FOUND}")
 if(CUDA_FOUND)
   message(STATUS "Found cuda, building cuda backend")
