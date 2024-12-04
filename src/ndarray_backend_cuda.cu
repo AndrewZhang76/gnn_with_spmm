@@ -646,6 +646,121 @@ __global__ void ReduceMaxKernel(const scalar_t* a, scalar_t* out, size_t reduce_
   }
 }
 
+__global__ void SparseMatmulKernelCOO(
+    const scalar_t*   A_data,
+    const int32_t*    A_row_indices,
+    const int32_t*    A_col_indices,
+    size_t            A_nnz,
+    const scalar_t*   B_data,
+    const int32_t*    B_row_indices,
+    const int32_t*    B_col_indices,
+    size_t            B_nnz,
+    scalar_t*         temp_data,
+    int32_t*          temp_row_indices,
+    int32_t*          temp_col_indices) {
+
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx < A_nnz) {
+    int32_t row_a = A_row_indices[idx];
+    int32_t col_a = A_col_indices[idx];
+    scalar_t val_a = A_data[idx];
+
+    // For each non-zero in B where B_row == col_a
+    for (size_t j = 0; j < B_nnz; ++j) {
+      if (B_row_indices[j] == col_a) {
+        int32_t col_b = B_col_indices[j];
+        scalar_t val_b = B_data[j];
+
+        // Compute the product
+        scalar_t val_c = val_a * val_b;
+        int32_t row_c = row_a;
+        int32_t col_c = col_b;
+
+        // Compute global index for temp arrays
+        size_t temp_idx = idx * B_nnz + j;
+        temp_data[temp_idx] = val_c;
+        temp_row_indices[temp_idx] = row_c;
+        temp_col_indices[temp_idx] = col_c;
+      }
+    }
+  }
+}
+
+void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
+  // Allocate temporary arrays
+  size_t temp_size = A.nnz * B.nnz;
+
+  scalar_t* temp_data;
+  int32_t* temp_row_indices;
+  int32_t* temp_col_indices;
+
+  cudaMalloc(&temp_data, temp_size * sizeof(scalar_t));
+  cudaMalloc(&temp_row_indices, temp_size * sizeof(int32_t));
+  cudaMalloc(&temp_col_indices, temp_size * sizeof(int32_t));
+
+  // Kernel launch parameters
+  CudaDims dim = CudaOneDim(A.nnz);
+
+  // Launch the kernel
+  SparseMatmulKernelCOO<<<dim.grid, dim.block>>>(
+      A.data, A.row_indices, A.col_indices, A.nnz,
+      B.data, B.row_indices, B.col_indices, B.nnz,
+      temp_data, temp_row_indices, temp_col_indices);
+  
+  // Synchronize and check for errors
+  cudaDeviceSynchronize();
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    throw std::runtime_error(cudaGetErrorString(err));
+  }
+
+  // Use Thrust to reduce duplicates
+  size_t nnz_temp = temp_size;
+
+  thrust::device_ptr<scalar_t> temp_data_ptr(temp_data);
+  thrust::device_ptr<int32_t> temp_row_ptr(temp_row_indices);
+  thrust::device_ptr<int32_t> temp_col_ptr(temp_col_indices);
+
+  auto zip_begin = thrust::make_zip_iterator(thrust::make_tuple(temp_row_ptr, temp_col_ptr));
+  auto zip_end = zip_begin + nnz_temp;
+
+  thrust::sort_by_key(zip_begin, zip_end, temp_data_ptr);
+
+  thrust::device_vector<scalar_t> data_reduced(nnz_temp);
+  thrust::device_vector<int32_t> row_reduced(nnz_temp);
+  thrust::device_vector<int32_t> col_reduced(nnz_temp);
+
+  auto zip_keys_out = thrust::make_zip_iterator(thrust::make_tuple(row_reduced.begin(), col_reduced.begin()));
+  auto new_end = thrust::reduce_by_key(
+      zip_begin,
+      zip_end,
+      temp_data_ptr,
+      zip_keys_out,
+      data_reduced.begin());
+
+  size_t nnz_C = thrust::distance(data_reduced.begin(), new_end.second);
+
+  // Assign reduced data to output matrix C
+  C->nnz = nnz_C;
+  C->rows = A.rows;
+  C->cols = B.cols;
+
+  cudaMalloc(&(C->data), nnz_C * sizeof(scalar_t));
+  cudaMalloc(&(C->row_indices), nnz_C * sizeof(int32_t));
+  cudaMalloc(&(C->col_indices), nnz_C * sizeof(int32_t));
+
+  // Copy reduced data to C
+  cudaMemcpy(C->data, data_reduced.data().get(), nnz_C * sizeof(scalar_t), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(C->row_indices, row_reduced.data().get(), nnz_C * sizeof(int32_t), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(C->col_indices, col_reduced.data().get(), nnz_C * sizeof(int32_t), cudaMemcpyDeviceToDevice);
+
+  // Clean up temporary memory
+  cudaFree(temp_data);
+  cudaFree(temp_row_indices);
+  cudaFree(temp_col_indices);
+}
+
 void ReduceMax(const CudaArray& a, CudaArray* out, size_t reduce_size) {
   /**
    * Reduce by taking maximum over `reduce_size` contiguous blocks.  Even though it is inefficient,
@@ -790,6 +905,7 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
   m.def("ewise_tanh", EwiseTanh);
 
   m.def("matmul", Matmul);
+  m.def("sparse_matmul_coo", SparseMatmulCOO);
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
