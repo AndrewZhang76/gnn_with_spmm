@@ -657,7 +657,8 @@ __global__ void SparseMatmulKernelCOO(
     size_t            B_nnz,
     scalar_t*         temp_data,
     int32_t*          temp_row_indices,
-    int32_t*          temp_col_indices) {
+    int32_t*          temp_col_indices,
+    unsigned long long int*    global_idx) {
 
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -674,44 +675,45 @@ __global__ void SparseMatmulKernelCOO(
 
         // Compute the product
         scalar_t val_c = val_a * val_b;
-        int32_t row_c = row_a;
-        int32_t col_c = col_b;
+        if (val_c != 0) {
+          // Atomically get the next index
+          size_t temp_idx = atomicAdd(global_idx, 1);
 
-        // Compute global index for temp arrays
-        size_t temp_idx = idx * B_nnz + j;
-        temp_data[temp_idx] = val_c;
-        temp_row_indices[temp_idx] = row_c;
-        temp_col_indices[temp_idx] = col_c;
+          // Write to temp arrays
+          temp_data[temp_idx] = val_c;
+          temp_row_indices[temp_idx] = row_a;
+          temp_col_indices[temp_idx] = col_b;
+        }
       }
     }
   }
 }
 
 void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
-  // Allocate temporary arrays
   size_t temp_size = A.nnz * B.nnz;
-
   scalar_t* temp_data;
   int32_t* temp_row_indices;
   int32_t* temp_col_indices;
-
+  unsigned long long int* global_idx;
   cudaMalloc(&temp_data, temp_size * sizeof(scalar_t));
   cudaMalloc(&temp_row_indices, temp_size * sizeof(int32_t));
   cudaMalloc(&temp_col_indices, temp_size * sizeof(int32_t));
+  cudaMalloc(&global_idx, sizeof(unsigned long long int));
+  cudaMemset(global_idx, 0, sizeof(unsigned long long int));
+  
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess) {
     throw std::runtime_error("Failed to allocate memory: " + std::string(cudaGetErrorString(err)));
   }
 
-  // Kernel launch parameters
+  // Phase 2: Kernel Execution
   CudaDims dim = CudaOneDim(A.nnz);
-
-  // Launch the kernel
   SparseMatmulKernelCOO<<<dim.grid, dim.block>>>(
       A.data, A.row_indices, A.col_indices, A.nnz,
       B.data, B.row_indices, B.col_indices, B.nnz,
-      temp_data, temp_row_indices, temp_col_indices);
-  
+      temp_data, temp_row_indices, temp_col_indices,
+      global_idx);
+
   // Synchronize and check for errors
   cudaDeviceSynchronize();
   err = cudaGetLastError();
@@ -719,8 +721,13 @@ void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
     throw std::runtime_error("Failed to launch kernel: " + std::string(cudaGetErrorString(err)));
   }
 
-  // Use Thrust to reduce duplicates
-  size_t nnz_temp = temp_size;
+  // Copy global_idx from device to host and print
+  unsigned long long int host_global_idx;
+  cudaMemcpy(&host_global_idx, global_idx, sizeof(unsigned long long int), cudaMemcpyDeviceToHost);
+  cudaFree(global_idx);
+
+  // Phase 3: Thrust Operations
+  size_t nnz_temp = host_global_idx;
 
   thrust::device_ptr<scalar_t> temp_data_ptr(temp_data);
   thrust::device_ptr<int32_t> temp_row_ptr(temp_row_indices);
@@ -731,21 +738,33 @@ void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
 
   thrust::sort_by_key(zip_begin, zip_end, temp_data_ptr);
 
-  thrust::device_vector<scalar_t> data_reduced(nnz_temp);
-  thrust::device_vector<int32_t> row_reduced(nnz_temp);
-  thrust::device_vector<int32_t> col_reduced(nnz_temp);
+  // Phase 4: Reduction
+  thrust::device_vector<int32_t> temp_rows(temp_row_indices, temp_row_indices + nnz_temp);
+  thrust::device_vector<int32_t> temp_cols(temp_col_indices, temp_col_indices + nnz_temp);
+  thrust::device_vector<scalar_t> temp_values(temp_data, temp_data + nnz_temp);
+  cudaFree(temp_data);
+  cudaFree(temp_row_indices);
+  cudaFree(temp_col_indices);
 
-  auto zip_keys_out = thrust::make_zip_iterator(thrust::make_tuple(row_reduced.begin(), col_reduced.begin()));
+  auto keys_in_begin = thrust::make_zip_iterator(thrust::make_tuple(temp_rows.begin(), temp_cols.begin()));
+  auto keys_in_end = thrust::make_zip_iterator(thrust::make_tuple(temp_rows.end(), temp_cols.end()));
+
+  thrust::device_vector<int32_t> out_rows(nnz_temp);
+  thrust::device_vector<int32_t> out_cols(nnz_temp);
+  thrust::device_vector<scalar_t> out_values(nnz_temp);
+
+  // Create zipped iterators for output keys
+  auto keys_out_begin = thrust::make_zip_iterator(thrust::make_tuple(out_rows.begin(), out_cols.begin()));
   auto new_end = thrust::reduce_by_key(
-      zip_begin,
-      zip_end,
-      temp_data_ptr,
-      zip_keys_out,
-      data_reduced.begin());
+      keys_in_begin,
+      keys_in_end,
+      temp_values.begin(),
+      keys_out_begin,
+      out_values.begin());
 
-  size_t nnz_C = thrust::distance(data_reduced.begin(), new_end.second);
+  size_t nnz_C = thrust::distance(out_values.begin(), new_end.second);
 
-  // Assign reduced data to output matrix C
+  // Phase 5: Final Memory Operations
   C->nnz = nnz_C;
   C->rows = A.rows;
   C->cols = B.cols;
@@ -754,15 +773,14 @@ void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
   cudaMalloc(&(C->row_indices), nnz_C * sizeof(int32_t));
   cudaMalloc(&(C->col_indices), nnz_C * sizeof(int32_t));
 
-  // Copy reduced data to C
-  cudaMemcpy(C->data, data_reduced.data().get(), nnz_C * sizeof(scalar_t), cudaMemcpyDeviceToDevice);
-  cudaMemcpy(C->row_indices, row_reduced.data().get(), nnz_C * sizeof(int32_t), cudaMemcpyDeviceToDevice);
-  cudaMemcpy(C->col_indices, col_reduced.data().get(), nnz_C * sizeof(int32_t), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(C->data, out_values.data().get(), nnz_C * sizeof(scalar_t), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(C->row_indices, out_rows.data().get(), nnz_C * sizeof(int32_t), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(C->col_indices, out_cols.data().get(), nnz_C * sizeof(int32_t), cudaMemcpyDeviceToDevice);
 
-  // Clean up temporary memory
-  cudaFree(temp_data);
-  cudaFree(temp_row_indices);
-  cudaFree(temp_col_indices);
+  err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    throw std::runtime_error("Failed to allocate memory at last " + std::string(cudaGetErrorString(err)));
+  }
 }
 
 __global__ void SparseDenseMatmulKernel(
