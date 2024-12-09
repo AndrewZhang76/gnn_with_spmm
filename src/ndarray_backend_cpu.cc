@@ -600,6 +600,64 @@ void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
   }
 }
 
+void SparseDenseMatmulCOO(const COOMatrix& S, const AlignedArray& D, AlignedArray* C, uint32_t m, uint32_t n, uint32_t p) {
+  /**
+   * Multiply a sparse matrix A in COO format with a dense matrix B and store the result in C.
+   *
+   * Args:
+   *   S: COOMatrix representing the sparse matrix (size m x n)
+   *   D: AlignedArray representing the dense matrix (size n x p)
+   *   C: AlignedArray pointer to store the result (size m x p)
+   *   m: number of rows in S
+   *   n: number of columns in S (should equal number of rows in D)
+   *   p: number of columns in D
+   */
+
+  std::fill(C->ptr, C->ptr + m * p, static_cast<scalar_t>(0));
+  for (size_t idx = 0; idx < S.nnz; ++idx) {
+    int32_t row_s = S.row_indices[idx];
+    int32_t col_s = S.col_indices[idx];
+    scalar_t val_s = S.data[idx];
+    for (uint32_t j = 0; j < p; ++j) {
+      C->ptr[row_s * p + j] += D.ptr[col_s * p + j] * val_s;
+    }
+  }
+}
+
+void DenseSparseMatmulCOO(const AlignedArray& D, const COOMatrix& S, AlignedArray* C, uint32_t m, uint32_t n, uint32_t p) {
+  /**
+   * Multiply a dense matrix D with a sparse matrix S in COO format and store the result in C.
+   *
+   * Args:
+   *   D: AlignedArray representing the dense matrix (size m x n)
+   *   S: COOMatrix representing the sparse matrix (size n x p)
+   *   C: AlignedArray pointer to store the result (size m x p)
+   *   m: number of rows in D
+   *   n: number of columns in D (should equal number of rows in S)
+   *   p: number of columns in S
+   */
+
+  // Check for valid matrix dimensions
+  if (n != S.rows) {
+    throw std::invalid_argument("Number of columns of D must equal number of rows of S");
+  }
+
+  // Initialize the output matrix C to zeros
+  std::fill(C->ptr, C->ptr + m * p, static_cast<scalar_t>(0));
+
+  // Perform multiplication
+  for (size_t idx = 0; idx < S.nnz; ++idx) {
+    int32_t row_s = S.row_indices[idx];  // Row index in S (0 to n-1)
+    int32_t col_s = S.col_indices[idx];  // Column index in S (0 to p-1)
+    scalar_t val_s = S.data[idx];
+
+    // Multiply and accumulate
+    for (uint32_t i = 0; i < m; ++i) {
+      C->ptr[i * p + col_s] += D.ptr[i * n + row_s] * val_s;
+    }
+  }
+}
+
 void ReduceMax(const AlignedArray& a, AlignedArray* out, size_t reduce_size) {
   /**
    * Reduce by taking maximum over `reduce_size` contiguous blocks.
@@ -732,6 +790,8 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
   m.def("matmul", Matmul);
   m.def("matmul_tiled", MatmulTiled);
   m.def("sparse_matmul_coo", SparseMatmulCOO);
+  m.def("sparse_dense_matmul_coo", SparseDenseMatmulCOO);
+  m.def("dense_sparse_matmul_coo", DenseSparseMatmulCOO);
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);

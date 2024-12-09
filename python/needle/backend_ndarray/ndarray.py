@@ -145,9 +145,19 @@ class SparseMatrix:
                                     sparse_fun=self.device.mod.sparse_sparse_add,
                                     dense_fun=self.device.mod.sparse_dense_add)
 
-    def __mul__(self, other):
-        return self.apply_func_based_on_type(other,
-                                    sparse_fun=self.device.mod.sparse_matmul_coo)
+    def __matmul__(self, other):
+        m = self.shape[0]
+        n = self.shape[1]
+        p = other.shape[1]
+        if isinstance(other, NDArray):
+            out = NDArray.make((m, p), device=self.device)
+            self.device.mod.sparse_dense_matmul_coo(self._handle, other.compact()._handle, out._handle, m, n, p)
+            return out
+        elif isinstance(other, SparseMatrix):
+            out_handle = self.device.mod.COOMatrix(m * p, m, p)
+            out = SparseMatrix(out_handle, device=self.device)
+            self.device.mod.sparse_matmul_coo(self._handle, other._handle, out._handle)
+            return out
 
     
 class NDArray:
@@ -594,6 +604,17 @@ class NDArray:
         the GPU version will just work natively by tiling any input size).
         """
 
+        # check other is sparse
+        if isinstance(other, SparseMatrix):
+            out = NDArray.make((self.shape[0], other.shape[1]), device=self.device)
+            assert len(self.shape) == 2 and len(other.shape) == 2
+            assert self.shape[1] == other.shape[0]
+            m = self.shape[0]
+            n = self.shape[1]
+            p = other.shape[1]
+            self.device.dense_sparse_matmul_coo(self.compact()._handle, other._handle, out._handle, m, n, p)
+            return out
+        
         assert self.ndim == 2 and other.ndim == 2
         assert self.shape[1] == other.shape[0]
 
@@ -748,14 +769,72 @@ def flip(a, axes):
 
 
 if __name__ == '__main__':
-    dense_array = NDArray(np.array([[0,2], [3,0]]), device=cuda())
-    # dense_array = NDArray(np.array([[1, 0, 3], [0, 2, 0]]), device=cuda())
-    # print(dense_array)
+    import time
 
-    sparse_array = dense_array.to_sparse()
-    print(sparse_array)
+    np.random.seed(0)
+    m = 50
+    n = 50
+    p = 50
+    device = cuda()
+    sparsity = 0.9
+    dense_array1 = np.random.randint(0, 10, size=(m, n))
+    dense_array2 = np.random.randint(0, 10, size=(n, p))
+    # randomly set some values to 0
+    dense_array1[np.random.randint(0, m, size=int(sparsity*m)), np.random.randint(0, n, size=int(sparsity*n))] = 0
+    dense_array2[np.random.randint(0, n, size=int(sparsity*n)), np.random.randint(0, p, size=int(sparsity*p))] = 0
 
-    dense_array2 = NDArray(np.array([[4,0], [0,5]]), device=cuda())
+    dense_array1 = NDArray(dense_array1, device=device)
+    dense_array2 = NDArray(dense_array2, device=device)
+
+    # Convert dense arrays to sparse
+    sparse_array1 = dense_array1.to_sparse()
     sparse_array2 = dense_array2.to_sparse()
-    print(sparse_array2)
-    print((sparse_array * sparse_array2).to_dense())
+
+    expected_dense = dense_array1 @ dense_array2
+
+    # Time the operations
+    
+    total_time = 0
+    # Test dense @ sparse
+    start = time.time()
+    result_dense_sparse = (dense_array1 @ sparse_array2)
+    end = time.time()
+    print("Time for dense @ sparse:", (end - start)*1000, "ms")
+    total_time += end - start
+
+    # Test sparse @ dense
+    start = time.time()
+    result_sparse_dense = (sparse_array1 @ dense_array2) 
+    end = time.time()
+    print("Time for sparse @ dense:", (end - start)*1000, "ms")
+    total_time += end - start
+
+    # Test sparse @ sparse
+    start = time.time()
+    result_sparse_sparse = (sparse_array1 @ sparse_array2).to_dense()
+    # This is apparently faster than above ...
+    # result_sparse_sparse = (sparse_array1.to_dense() @ sparse_array2).to_sparse().to_dense()
+    end = time.time()
+    print("Time for sparse @ sparse:", (end - start)*1000, "ms")
+    total_time += end - start
+    print("Total time:", total_time*1000, "ms")
+
+    test_result = np.allclose(result_dense_sparse.numpy(), expected_dense.numpy())
+    print("dense @ sparse:", test_result)
+    if not test_result:
+        print("Expected:", expected_dense)
+        print("Got:", result_dense_sparse)
+
+    # Test sparse @ dense
+    test_result = np.allclose(result_sparse_dense.numpy(), expected_dense.numpy())
+    print("sparse @ dense:", test_result)
+    if not test_result:
+        print("Expected:", expected_dense)
+        print("Got:", result_sparse_dense)
+
+    # Test sparse @ sparse
+    test_result = np.allclose(result_sparse_sparse.numpy(), expected_dense.numpy())
+    print("sparse @ sparse:", test_result)
+    if not test_result:
+        print("Expected:", expected_dense)
+        print("Got:", result_sparse_sparse)

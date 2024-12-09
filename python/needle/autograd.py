@@ -17,7 +17,7 @@ TENSOR_COUNTER = 0
 import numpy as array_api
 NDArray = numpy.ndarray
 
-from .backend_selection import array_api, NDArray, default_device
+from .backend_selection import array_api, NDArray, SparseMatrix, default_device
 
 class Op:
     """Operator definition."""
@@ -25,7 +25,7 @@ class Op:
     def __call__(self, *args):
         raise NotImplementedError()
 
-    def compute(self, *args: Tuple[NDArray]):
+    def compute(self, *args: Tuple[Union[NDArray, SparseMatrix]]):
         """Calculate forward pass of operator.
 
         Parameters
@@ -95,8 +95,24 @@ class Value:
     inputs: List["Value"]
     # The following fields are cached fields for
     # dynamic computation
-    cached_data: NDArray
+    cached_data: Union[NDArray, SparseMatrix, None]
     requires_grad: bool
+
+    def is_sparse(self):
+        """Check if value contains sparse data"""
+        return isinstance(self.cached_data, SparseMatrix)
+
+    def to_sparse(self):
+        """Convert cached data to sparse format"""
+        if not self.is_sparse():
+            self.cached_data = self.cached_data.to_sparse() 
+        return self
+
+    def to_dense(self):
+        """Convert cached data to dense format"""
+        if self.is_sparse():
+            self.cached_data = self.cached_data.to_dense()
+        return self
 
     def realize_cached_data(self):
         """Run compute to realize the cached data"""

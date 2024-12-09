@@ -698,6 +698,10 @@ void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
   cudaMalloc(&temp_data, temp_size * sizeof(scalar_t));
   cudaMalloc(&temp_row_indices, temp_size * sizeof(int32_t));
   cudaMalloc(&temp_col_indices, temp_size * sizeof(int32_t));
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    throw std::runtime_error("Failed to allocate memory: " + std::string(cudaGetErrorString(err)));
+  }
 
   // Kernel launch parameters
   CudaDims dim = CudaOneDim(A.nnz);
@@ -710,9 +714,9 @@ void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
   
   // Synchronize and check for errors
   cudaDeviceSynchronize();
-  cudaError_t err = cudaGetLastError();
+  err = cudaGetLastError();
   if (err != cudaSuccess) {
-    throw std::runtime_error(cudaGetErrorString(err));
+    throw std::runtime_error("Failed to launch kernel: " + std::string(cudaGetErrorString(err)));
   }
 
   // Use Thrust to reduce duplicates
@@ -759,6 +763,82 @@ void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
   cudaFree(temp_data);
   cudaFree(temp_row_indices);
   cudaFree(temp_col_indices);
+}
+
+__global__ void SparseDenseMatmulKernel(
+    const scalar_t* A_data,
+    const scalar_t* B_data,
+    const int32_t* A_row_indices,
+    const int32_t* A_col_indices,
+    size_t M,
+    size_t N,
+    size_t P,
+    size_t A_nnz,
+    scalar_t* C_data)
+{
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < A_nnz * P) {
+    size_t a_idx = idx / P;
+    size_t i = idx % P;
+
+    int32_t row_A = A_row_indices[a_idx];
+    int32_t col_A = A_col_indices[a_idx];
+    scalar_t A_value = A_data[a_idx];
+    scalar_t B_value = B_data[col_A * P + i];
+
+    atomicAdd(&C_data[row_A * P + i], A_value * B_value);
+  }
+}
+
+void SparseDenseMatmul(const COOMatrix& A, const CudaArray& B, CudaArray* C, uint32_t M, uint32_t N, uint32_t P) {
+  cudaMemset(C->ptr, 0, C->size * sizeof(scalar_t));
+  CudaDims dim = CudaOneDim(A.nnz * P);
+  SparseDenseMatmulKernel<<<dim.grid, dim.block>>>(
+      A.data, B.ptr, A.row_indices, A.col_indices, M, N, P, A.nnz, C->ptr);
+  cudaDeviceSynchronize();
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    throw std::runtime_error(cudaGetErrorString(err));
+  }
+}
+
+__global__ void DenseSparseMatmulKernel(
+    const scalar_t* A_data,
+    const scalar_t* B_data,
+    const int32_t* B_row_indices,
+    const int32_t* B_col_indices,
+    size_t M,
+    size_t N,
+    size_t P,
+    size_t B_nnz,
+    scalar_t* C_data)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < B_nnz * M) {
+        size_t b_idx = idx / M;
+        size_t i = idx % M;
+
+        int32_t row_B = B_row_indices[b_idx];
+        int32_t col_B = B_col_indices[b_idx];
+        scalar_t B_value = B_data[b_idx];
+        scalar_t A_value = A_data[i * N + row_B];
+
+        atomicAdd(&C_data[i * P + col_B], A_value * B_value);
+    }
+}
+
+void DenseSparseMatmul(const CudaArray& A, const COOMatrix& B, CudaArray* C, uint32_t M, uint32_t N, uint32_t P) {
+    cudaMemset(C->ptr, 0, C->size * sizeof(scalar_t));
+    CudaDims dim = CudaOneDim(B.nnz * M);
+    DenseSparseMatmulKernel<<<dim.grid, dim.block>>>(
+        A.ptr, B.data, B.row_indices, B.col_indices, M, N, P, B.nnz, C->ptr);
+
+    cudaDeviceSynchronize();
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      throw std::runtime_error(cudaGetErrorString(err));
+    }
 }
 
 void ReduceMax(const CudaArray& a, CudaArray* out, size_t reduce_size) {
@@ -906,6 +986,8 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
 
   m.def("matmul", Matmul);
   m.def("sparse_matmul_coo", SparseMatmulCOO);
+  m.def("sparse_dense_matmul_coo", SparseDenseMatmul);
+  m.def("dense_sparse_matmul_coo", DenseSparseMatmul);
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
