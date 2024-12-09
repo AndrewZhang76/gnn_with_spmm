@@ -660,33 +660,30 @@ __global__ void SparseMatmulKernelCOO(
     int32_t*          temp_col_indices,
     unsigned long long int*    global_idx) {
 
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total_nnz = A_nnz * B_nnz;
 
-  if (idx < A_nnz) {
-    int32_t row_a = A_row_indices[idx];
-    int32_t col_a = A_col_indices[idx];
-    scalar_t val_a = A_data[idx];
+    if (idx < total_nnz) {
+      size_t i = idx / B_nnz;
+      size_t j = idx % B_nnz;
 
-    // For each non-zero in B where B_row == col_a
-    for (size_t j = 0; j < B_nnz; ++j) {
+      int32_t col_a = A_col_indices[i];
+      int32_t row_a = A_row_indices[i];
+      scalar_t val_a = A_data[i];
+
       if (B_row_indices[j] == col_a) {
         int32_t col_b = B_col_indices[j];
         scalar_t val_b = B_data[j];
 
-        // Compute the product
         scalar_t val_c = val_a * val_b;
         if (val_c != 0) {
-          // Atomically get the next index
           size_t temp_idx = atomicAdd(global_idx, 1);
-
-          // Write to temp arrays
           temp_data[temp_idx] = val_c;
           temp_row_indices[temp_idx] = row_a;
           temp_col_indices[temp_idx] = col_b;
         }
       }
     }
-  }
 }
 
 void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
@@ -707,7 +704,7 @@ void SparseMatmulCOO(const COOMatrix& A, const COOMatrix& B, COOMatrix* C) {
   }
 
   // Phase 2: Kernel Execution
-  CudaDims dim = CudaOneDim(A.nnz);
+  CudaDims dim = CudaOneDim(A.nnz*B.nnz);
   SparseMatmulKernelCOO<<<dim.grid, dim.block>>>(
       A.data, A.row_indices, A.col_indices, A.nnz,
       B.data, B.row_indices, B.col_indices, B.nnz,
