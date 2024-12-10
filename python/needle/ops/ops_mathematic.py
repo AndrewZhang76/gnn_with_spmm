@@ -3,17 +3,68 @@
 from numbers import Number
 from typing import Optional, List, Tuple, Union
 
-from ..autograd import NDArray
+from ..autograd import NDArray, SparseMatrix
 from ..autograd import Op, Tensor, Value, TensorOp
 from ..autograd import TensorTuple, TensorTupleOp
-import numpy
 
 # NOTE: we will import numpy as the array_api
 # as the backend for our computations, this line will change in later homeworks
-
 from ..backend_selection import array_api, BACKEND
 from .ops_tuple import *
 
+################## SparseMatrix Add #########################
+
+class SparseAdd(TensorOp):
+    """Add two matrices when at least one is sparse."""
+    def compute(self, a, b):
+        # Sparse + Sparse -> Sparse
+        # Sparse + Dense -> Dense
+        return a + b
+
+    def gradient(self, out_grad, node):
+        return out_grad, out_grad
+
+def sparse_add(a, b):
+    # Ensure at least one is sparse
+    if not (isinstance(a, SparseMatrix) or isinstance(b, SparseMatrix)):
+        raise TypeError("sparse_add called with non-sparse tensors.")
+    return SparseAdd()(a, b)
+
+
+################## SparseMatrix Matmul #########################
+
+class SparseMatMul(TensorOp):
+    """Sparse Matrix Multiplication Operator"""
+    def compute(self, a, b):
+        # Sparse @ Sparse -> Dense
+        # Sparse @ Dense -> Dense
+        # Dense @ Sparse -> Dense
+        return a @ b
+
+    def gradient(self, out_grad, node):
+        a, b = node.inputs
+
+        # Ensure out_grad is dense
+        if isinstance(out_grad.realize_cached_data(), SparseMatrix):
+            out_grad = out_grad.to_dense()
+
+        # Ensure inputs a and b are dense
+        if isinstance(a.realize_cached_data(), SparseMatrix):
+            a = a.to_dense()
+        if isinstance(b.realize_cached_data(), SparseMatrix):
+            b = b.to_dense()
+
+        # TODO: whether implement sparse transpose
+        grad_a = matmul(out_grad, transpose(b, axes=(-1, -2)))
+        grad_b = matmul(transpose(a, axes=(-1, -2)), out_grad)
+
+        return grad_a, grad_b
+
+
+def sparse_matmul(a, b):
+    return SparseMatMul()(a, b)
+
+################## NDarray Ops #########################
 
 class EWiseAdd(TensorOp):
     def compute(self, a: NDArray, b: NDArray):
