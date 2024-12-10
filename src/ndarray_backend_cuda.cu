@@ -856,6 +856,54 @@ void DenseSparseMatmul(const CudaArray& A, const COOMatrix& B, CudaArray* C, uin
     }
 }
 
+
+__global__ void SparseSparseMatmulKernel(
+    const scalar_t* A_data,
+    const int32_t* A_row_indices,
+    const int32_t* A_col_indices,
+    const scalar_t* B_data,
+    const int32_t* B_row_indices,
+    const int32_t* B_col_indices,
+    size_t M,
+    size_t N,
+    size_t P,
+    size_t A_nnz,
+    size_t B_nnz,
+    scalar_t* C_data)
+{
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  size_t total_nnz = A_nnz * B_nnz;
+
+  if (idx < total_nnz) {
+    size_t i = idx / B_nnz;
+    size_t j = idx % B_nnz;
+
+    int32_t col_a = A_col_indices[i];
+    int32_t row_a = A_row_indices[i];
+    scalar_t val_a = A_data[i];
+
+    if (B_row_indices[j] == col_a) {
+      int32_t col_b = B_col_indices[j];
+      scalar_t val_b = B_data[j];
+
+      scalar_t val_c = val_a * val_b;
+      atomicAdd(&C_data[row_a * P + col_b], val_c);
+    }
+  }
+}
+
+void SparseSparseMatmul(const COOMatrix& A, const COOMatrix& B, CudaArray* C, uint32_t M, uint32_t N, uint32_t P) {
+  cudaMemset(C->ptr, 0, C->size * sizeof(scalar_t));
+  CudaDims dim = CudaOneDim(A.nnz * B.nnz);
+  SparseSparseMatmulKernel<<<dim.grid, dim.block>>>(
+      A.data, A.row_indices, A.col_indices, B.data, B.row_indices, B.col_indices, M, N, P, A.nnz, B.nnz, C->ptr);
+  cudaDeviceSynchronize();
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    throw std::runtime_error(cudaGetErrorString(err));
+  }
+}
+
 void ReduceMax(const CudaArray& a, CudaArray* out, size_t reduce_size) {
   /**
    * Reduce by taking maximum over `reduce_size` contiguous blocks.  Even though it is inefficient,
@@ -1003,6 +1051,7 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
   m.def("sparse_matmul_coo", SparseMatmulCOO);
   m.def("sparse_dense_matmul_coo", SparseDenseMatmul);
   m.def("dense_sparse_matmul_coo", DenseSparseMatmul);
+  m.def("sparse_sparse_matmul_coo", SparseSparseMatmul);
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);

@@ -145,7 +145,7 @@ class SparseMatrix:
                                     sparse_fun=self.device.mod.sparse_sparse_add,
                                     dense_fun=self.device.mod.sparse_dense_add)
 
-    def __matmul__(self, other):
+    def __matmul__(self, other, flag = False):
         m = self.shape[0]
         n = self.shape[1]
         p = other.shape[1]
@@ -154,9 +154,14 @@ class SparseMatrix:
             self.device.mod.sparse_dense_matmul_coo(self._handle, other.compact()._handle, out._handle, m, n, p)
             return out
         elif isinstance(other, SparseMatrix):
+          if flag:
             out_handle = self.device.mod.COOMatrix(m * p, m, p)
             out = SparseMatrix(out_handle, device=self.device)
             self.device.mod.sparse_matmul_coo(self._handle, other._handle, out._handle)
+            return out
+          else:
+            out = NDArray.make((m, p), device=self.device)
+            self.device.mod.sparse_sparse_matmul_coo(self._handle, other._handle, out._handle, m, n, p)
             return out
 
     
@@ -772,26 +777,35 @@ if __name__ == '__main__':
     import time
 
     np.random.seed(0)
-    m = 50
-    n = 50
-    p = 50
+    m = 500
+    n = 500
+    p = 500
     device = cuda()
-    sparsity = 0.9
-    dense_array1 = np.random.randint(0, 10, size=(m, n))
-    dense_array2 = np.random.randint(0, 10, size=(n, p))
+    sparsity = 0.999
+    dense_array1 = np.zeros((m,n))
+    dense_array2 = np.zeros((n, p))
     # randomly set some values to 0
-    dense_array1[np.random.randint(0, m, size=int(sparsity*m)), np.random.randint(0, n, size=int(sparsity*n))] = 0
-    dense_array2[np.random.randint(0, n, size=int(sparsity*n)), np.random.randint(0, p, size=int(sparsity*p))] = 0
-
+    row_indices_1 = np.random.choice(m, int(m*n*(1-sparsity)), replace=True)
+    col_indices_1 = np.random.choice(n, int(m*n*(1-sparsity)), replace=True)
+    value_1 = np.random.random(int(m*n*(1-sparsity)))
+    for r, c, v in zip(row_indices_1, col_indices_1, value_1):
+      dense_array1[r, c] = v
     dense_array1 = NDArray(dense_array1, device=device)
+    row_indices_2 = np.random.choice(n, int(p*n*(1-sparsity)), replace=True)
+    col_indices_2 = np.random.choice(p, int(p*n*(1-sparsity)), replace=True)
+    value_2 = np.random.random(int(p*n*(1-sparsity)))
+    for r, c, v in zip(row_indices_2, col_indices_2, value_2):
+      dense_array2[r, c] = v
     dense_array2 = NDArray(dense_array2, device=device)
 
     # Convert dense arrays to sparse
     sparse_array1 = dense_array1.to_sparse()
     sparse_array2 = dense_array2.to_sparse()
 
+    start = time.time()
     expected_dense = dense_array1 @ dense_array2
-
+    end = time.time()
+    print("Time for dense @ dense:", (end-start)*1000, "ms")
     # Time the operations
     
     total_time = 0
@@ -811,7 +825,8 @@ if __name__ == '__main__':
 
     # Test sparse @ sparse
     start = time.time()
-    result_sparse_sparse = (sparse_array1 @ sparse_array2).to_dense()
+    # result_sparse_sparse = (sparse_array1 @ sparse_array2).to_dense()
+    result_sparse_sparse = (sparse_array1 @ sparse_array2)
     # This is apparently faster than above ...
     # result_sparse_sparse = (sparse_array1.to_dense() @ sparse_array2).to_sparse().to_dense()
     end = time.time()
