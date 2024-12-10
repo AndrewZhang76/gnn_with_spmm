@@ -4,7 +4,31 @@ class Transform:
     def __call__(self, x):
         raise NotImplementedError
 
+##################### For Cora Dataset #####################
+class ToTensor(Transform):
+    def __init__(self, device=None, dtype="float32"):
+        self.device = device
+        self.dtype = dtype
 
+    def __call__(self, data):
+        # tuple (X, y, A) 
+        X, y, A = data
+        import needle as ndl
+        X = ndl.Tensor(X, device=self.device, dtype=self.dtype)
+        y = ndl.Tensor(y, device=self.device, dtype="int32")        # Labels are integers
+        A = ndl.Tensor(A, device=self.device, dtype=self.dtype)
+        return X, y, A
+    
+class Compose(Transform):
+    def __init__(self, transforms):
+        self.transforms = transforms
+
+    def __call__(self, data):
+        for t in self.transforms:
+            data = t(data)
+        return data
+
+##################### For image Dataset #####################
 class RandomFlipHorizontal(Transform):
     def __init__(self, p = 0.5):
         self.p = p
