@@ -2,7 +2,6 @@ import numpy as np
 import sys
 sys.path.append("python/")
 import needle as ndl
-from apps.models import *
 
 def train_gcn(model, dataloader, num_epochs, learning_rate):
     """
