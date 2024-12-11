@@ -8,12 +8,49 @@ import sys
 
 sys.path.append("python/")
 import needle as ndl
-
 import needle.nn as nn
 from apps.models import *
 import time
 device = ndl.cpu()
 
+### Cora training ###
+
+def train_cora(model, dataset, n_epochs=200, optimizer=ndl.optim.Adam, lr=0.01, weight_decay=5e-4):
+    X, A, y, idx_train = dataset.get_train_data()
+    opt = optimizer(model.parameters(), lr=lr, weight_decay=weight_decay)
+    loss_fn = nn.SoftmaxLoss()
+
+    for epoch in range(n_epochs):
+        model.train()
+        opt.zero_grad()
+
+        out = model(X, A)
+        train_out = out[idx_train, :]
+        train_labels = y[idx_train]
+        loss = loss_fn(train_out, train_labels)
+
+        loss.backward()
+        opt.step()
+
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch} | Loss: {loss.numpy():.4f}")
+
+def evaluate_cora(model, dataset, split='test'):
+    model.eval()
+    if split == 'train':
+        X, A, y, idx = dataset.get_train_data()
+    elif split == 'val':
+        X, A, y, idx = dataset.get_val_data()
+    else:
+        X, A, y, idx = dataset.get_test_data()
+
+    out = model(X, A)
+    out_split = out[idx, :]
+    labels_split = y[idx].numpy()
+    preds = out_split.numpy().argmax(axis=1)
+    acc = (preds == labels_split).mean()
+    print(f"{split.capitalize()} Accuracy: {acc:.4f}")
+    return acc
 
 def parse_mnist(image_filename, label_filename):
     """ Read an images and labels file in MNIST format.  See this page:
@@ -62,8 +99,6 @@ def parse_mnist(image_filename, label_filename):
     return (image_data, labels)
     ### END YOUR CODE
 
-
-
 def softmax_loss(Z, y_one_hot):
     """Return softmax loss.  Note that for the purposes of this assignment,
     you don't need to worry about "nicely" scaling the numerical properties
@@ -88,7 +123,6 @@ def softmax_loss(Z, y_one_hot):
     Z2 = ndl.ops.summation(Z * y_one_hot)
     return (Z1 - Z2) / m
     ### END YOUR SOLUTION
-
 
 def nn_epoch(X, y, W1, W2, lr=0.1, batch=100):
     """Run a single epoch of SGD for a two-layer neural network defined by the
