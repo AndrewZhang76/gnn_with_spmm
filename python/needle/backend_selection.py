@@ -15,9 +15,11 @@ if BACKEND == "nd":
         cpu_numpy,
         default_device,
         BackendDevice as Device,
+        SparseMatrix
     )
 
     NDArray = array_api.NDArray
+
 elif BACKEND == "np":
     print("Using numpy backend")
     import numpy as array_api
