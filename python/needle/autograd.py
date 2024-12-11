@@ -17,7 +17,7 @@ TENSOR_COUNTER = 0
 import numpy as array_api
 NDArray = numpy.ndarray
 
-from .backend_selection import array_api, NDArray, SparseMatrix, default_device
+from .backend_selection import array_api, NDArray, default_device, SparseMatrix
 
 class Op:
     """Operator definition."""

@@ -15,9 +15,8 @@ if BACKEND == "nd":
         cpu_numpy,
         default_device,
         BackendDevice as Device,
-        SparseMatrix
     )
-
+    SparseMatrix = array_api.SparseMatrix
     NDArray = array_api.NDArray
 
 elif BACKEND == "np":
