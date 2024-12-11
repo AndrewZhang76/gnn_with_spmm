@@ -1,80 +1,54 @@
 import numpy as np
 from ..autograd import Tensor
 
-from typing import Iterator, Optional, List, Sized, Tuple, Union, Iterable, Any
+class DataLoader:
+    """
+    A simple data loader for batching and shuffling CoraDataset data.
 
-
-
-class Dataset:
-    r"""An abstract class representing a `Dataset`.
-
-    All subclasses should overwrite :meth:`__getitem__`, supporting fetching a
-    data sample for a given key. Subclasses must also overwrite
-    :meth:`__len__`, which is expected to return the size of the dataset.
+    Args:
+        X (np.array): Feature matrix.
+        y (np.array): Labels.
+        adjacency_matrix (np.array): Dense adjacency matrix.
+        batch_size (int): Number of samples per batch.
+        shuffle (bool): Whether to shuffle the data at the beginning of each iteration.
     """
 
-    def __init__(self, transforms: Optional[List] = None):
-        self.transforms = transforms
-
-    def __getitem__(self, index) -> object:
-        raise NotImplementedError
-
-    def __len__(self) -> int:
-        raise NotImplementedError
-    
-    def apply_transforms(self, x):
-        if self.transforms is not None:
-            # apply the transforms
-            for tform in self.transforms:
-                x = tform(x)
-        return x
-
-
-class DataLoader:
-    r"""
-    Data loader. Combines a dataset and a sampler, and provides an iterable over
-    the given dataset.
-    Args:
-        dataset (Dataset): dataset from which to load the data.
-        batch_size (int, optional): how many samples per batch to load
-            (default: ``1``).
-        shuffle (bool, optional): set to ``True`` to have the data reshuffled
-            at every epoch (default: ``False``).
-     """
-    dataset: Dataset
-    batch_size: Optional[int]
-
-    def __init__(
-        self,
-        dataset: Dataset,
-        batch_size: Optional[int] = 1,
-        shuffle: bool = False,
-    ):
-
-        self.dataset = dataset
-        self.shuffle = shuffle
+    def __init__(self, X, y, adjacency_matrix, batch_size=1, shuffle=False, device = None):
+        self.X = X
+        self.y = y
+        self.adjacency_matrix = adjacency_matrix
         self.batch_size = batch_size
-        if not self.shuffle:
-            self.ordering = np.array_split(np.arange(len(dataset)), range(batch_size, len(dataset), batch_size))
+        self.shuffle = shuffle
+        self.num_samples = X.shape[0]
+        self.order = np.arange(self.num_samples)
+        self.device = device
 
     def __iter__(self):
-        ### BEGIN YOUR SOLUTION
+        """Initializes the iterator."""
         if self.shuffle:
-            orders = np.arange(len(self.dataset))
-            np.random.shuffle(orders)
-            self.ordering = np.array_split(orders, range(self.batch_size, len(self.dataset), self.batch_size))
+            np.random.shuffle(self.order)
         self.index = 0
-        ### END YOUR SOLUTION
         return self
 
     def __next__(self):
-        ### BEGIN YOUR SOLUTION
-
-        if self.index == len(self.ordering):
+        """Fetches the next batch of data."""
+        if self.index >= self.num_samples:
             raise StopIteration
-        batch = []
-        for i in self.dataset[self.ordering[self.index]]:
-          batch.append(Tensor(i))
-        self.index += 1
-        return batch
-        ### END YOUR SOLUTION
+
+        # Get indices for the current batch
+        start = self.index
+        end = min(self.index + self.batch_size, self.num_samples)
+        batch_indices = self.order[start:end]
+
+        # Fetch the batch
+        X_batch = self.X[batch_indices]
+        y_batch = self.y[batch_indices]
+        adjacency_batch = self.adjacency_matrix[batch_indices][:, batch_indices]
+
+        # Convert to Tensors
+        X_batch = Tensor(X_batch, device = self.device)
+        y_batch = Tensor(y_batch, device = self.device)
+        adjacency_batch = Tensor(adjacency_batch, device = self.device)
+
+        self.index += self.batch_size
+        return X_batch, y_batch, adjacency_batch
