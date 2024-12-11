@@ -1,20 +1,22 @@
 from needle.autograd import Tensor
 from nn_basic import Module, Parameter, ReLU
-from needle import ops, init
+from needle import ops
+import needle.init as init
 
 class GraphConvolution(Module):
     def __init__(self, in_features, out_features, bias=True, device=None, dtype="float32"):
         super().__init__()
-        # Weight initialization similar to a linear layer
         self.weight = Parameter(init.kaiming_uniform(in_features, out_features, device=device, dtype=dtype))
         self.bias = Parameter(init.kaiming_uniform(out_features, 1, device=device, dtype=dtype).reshape((1, out_features))) if bias else None
 
     def forward(self, X: Tensor, A: Tensor) -> Tensor:
-        # A: [N, N], X: [N, in_features]
-        out = ops.matmul(A, X)
+        out = ops.sparse_matmul(A, X)
+        print("out1", out) # check sparse or dense
         out = ops.matmul(out, self.weight)
+        print("out2", out) # check if sparse or dense
         if self.bias is not None:
             out = out + self.bias.broadcast_to(out.shape)
+        print("out3", out3)
         return out
 
 class GCN(Module):
